@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile
 import requests
 import base64
 import os
@@ -8,22 +8,19 @@ app = FastAPI()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 @app.post("/extract")
-async def extract_data(file: UploadFile = File(...)):
-    if not OPENROUTER_API_KEY:
-        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY missing")
-
+async def extract_data(file: UploadFile):
     content = await file.read()
     encoded = base64.b64encode(content).decode("utf-8")
 
     payload = {
-        "model": "qwen/qwen2.5-vl-7b-instruct:free",
+        "model": "qwen/qwen2.5-vl-7b-instruct",  # ✅ NO :free
         "messages": [
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": "Extract hotel, transport, visa, ziyarat, routes, and rates. Return clean JSON only."
+                        "text": "Extract hotel, transport, visa, ziyarat, routes, and rates data. Return JSON only."
                     },
                     {
                         "type": "image_url",
@@ -46,15 +43,4 @@ async def extract_data(file: UploadFile = File(...)):
         timeout=60
     )
 
-    if response.status_code != 200:
-        raise HTTPException(
-            status_code=500,
-            detail=response.text
-        )
-
-    data = response.json()
-
-    if "choices" not in data:
-        raise HTTPException(status_code=500, detail=data)
-
-    return data["choices"][0]["message"]["content"]
+    return response.json()
