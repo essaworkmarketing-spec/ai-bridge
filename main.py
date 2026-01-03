@@ -7,59 +7,54 @@ app = FastAPI()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL_ID = "qwen/qwen-2.5-vl-7b-instruct:free"
-
 @app.post("/extract")
-async def extract_data(
-    file: UploadFile = File(...),
-    prompt: str = "Extract hotel, transport, visa, ziyarat, routes, and rates data. Return STRICT JSON only."
-):
-    try:
-        content = await file.read()
-        encoded = base64.b64encode(content).decode("utf-8")
+async def extract_data(file: UploadFile = File(...)):
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY missing")
 
-        payload = {
-            "model": MODEL_ID,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": f"data:image/png;base64,{encoded}"
-                        }
-                    ]
-                }
-            ]
-        }
+    content = await file.read()
+    encoded = base64.b64encode(content).decode("utf-8")
 
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://yourdomain.com",
-            "X-Title": "Packitfy AI Bridge"
-        }
+    payload = {
+        "model": "qwen/qwen2.5-vl-7b-instruct:free",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Extract hotel, transport, visa, ziyarat, routes, and rates. Return clean JSON only."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": f"data:image/png;base64,{encoded}"
+                    }
+                ]
+            }
+        ]
+    }
 
-        res = requests.post(OPENROUTER_URL, json=payload, headers=headers, timeout=60)
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-        if res.status_code != 200:
-            raise HTTPException(status_code=500, detail=res.text)
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=60
+    )
 
-        data = res.json()
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=500,
+            detail=response.text
+        )
 
-        # 🚨 OpenRouter error handling
-        if "error" in data:
-            raise HTTPException(status_code=500, detail=data["error"])
+    data = response.json()
 
-        # ✅ CLEAN JSON ONLY (Lovable expects this)
-        content = data["choices"][0]["message"]["content"]
+    if "choices" not in data:
+        raise HTTPException(status_code=500, detail=data)
 
-        return {
-            "success": True,
-            "data": content
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return data["choices"][0]["message"]["content"]
