@@ -1,46 +1,30 @@
 from fastapi import FastAPI, UploadFile, Form
 from fastapi.responses import JSONResponse
-import requests, base64, os, re, json
+import requests, base64, os, re
 
 app = FastAPI()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 SYSTEM_PROMPT = """
-You are a professional data extraction engine for Hajj & Umrah travel agencies.
+You are a data extraction engine.
 
-Rules:
-1. Extract ALL entities present in the file. No limits.
-2. Detect automatically:
-   - Hotels
-   - City (Makkah / Madinah / Other if mentioned)
-   - Room rates (sharing, double, triple, quad, quint, etc.)
-   - Transport (shuttle, private, car types)
-   - Ziyarat packages
-3. Do NOT summarize.
-4. Do NOT skip rows.
-5. If a value is missing, return null.
-6. Return ONLY valid JSON in the exact schema below.
-7. Never add explanations or text outside JSON.
+Extract ALL hotels, transport and ziyarat data.
+Do NOT format as markdown.
+Do NOT add explanations.
 
-Schema:
-{
-  "hotels": [
-    {
-      "name": "",
-      "city": "",
-      "rates": {
-        "sharing": null,
-        "double": null,
-        "triple": null,
-        "quad": null,
-        "quint": null
-      }
-    }
-  ],
-  "transport": [],
-  "ziyarat": []
-}
+Return data in plain structured text like:
+
+HOTEL:
+Name: ARAFAT GOLDEN
+City: Makkah
+Sharing: 16
+Quint: 20
+Quad: 32
+Triple: 24
+Double: 48
+
+Repeat for ALL rows.
 """
 
 @app.post("/extract")
@@ -49,13 +33,12 @@ async def extract_data(
     instructions: str = Form(default="")
 ):
     try:
-        # Read & encode image/file
         content = await file.read()
         encoded = base64.b64encode(content).decode("utf-8")
 
-        user_prompt = SYSTEM_PROMPT
+        final_prompt = SYSTEM_PROMPT
         if instructions.strip():
-            user_prompt += f"\nAdditional instructions:\n{instructions}"
+            final_prompt += "\nUser Instructions:\n" + instructions
 
         payload = {
             "model": "anthropic/claude-3.5-sonnet",
@@ -63,7 +46,7 @@ async def extract_data(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": user_prompt},
+                        {"type": "text", "text": final_prompt},
                         {
                             "type": "image_url",
                             "image_url": f"data:image/png;base64,{encoded}"
@@ -72,7 +55,7 @@ async def extract_data(
                 }
             ],
             "temperature": 0,
-            "max_tokens": 2000
+            "max_tokens": 1800
         }
 
         headers = {
@@ -88,36 +71,34 @@ async def extract_data(
         )
 
         result = response.json()
+        text = result["choices"][0]["message"]["content"]
 
-        if "choices" not in result:
-            return JSONResponse(
-                status_code=500,
-                content={"error": result}
-            )
+        # -------- SAFE PARSING --------
+        hotels = []
+        blocks = re.split(r"\n\s*HOTEL:\s*", text)
 
-        raw_text = result["choices"][0]["message"]["content"]
+        for block in blocks[1:]:
+            def find(label):
+                m = re.search(label + r":\s*(.+)", block)
+                return m.group(1).strip() if m else None
 
-        # ---- HARD JSON EXTRACTION ----
-        json_match = re.search(r"\{[\s\S]*\}", raw_text)
-        if not json_match:
-            return JSONResponse(
-                status_code=500,
-                content={"error": "No JSON detected from AI"}
-            )
+            hotels.append({
+                "name": find("Name"),
+                "city": find("City"),
+                "rates": {
+                    "sharing": find("Sharing"),
+                    "quint": find("Quint"),
+                    "quad": find("Quad"),
+                    "triple": find("Triple"),
+                    "double": find("Double")
+                }
+            })
 
-        clean_json = json.loads(json_match.group())
-
-        # ---- FINAL NORMALIZATION FOR LOVABLE ----
-        final_output = {
-            "hotels": clean_json.get("hotels", []),
-            "transport": clean_json.get("transport", []),
-            "ziyarat": clean_json.get("ziyarat", [])
+        return {
+            "hotels": hotels,
+            "transport": [],
+            "ziyarat": []
         }
 
-        return final_output
-
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e)})
