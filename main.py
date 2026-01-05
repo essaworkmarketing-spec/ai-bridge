@@ -1,37 +1,46 @@
 from fastapi import FastAPI, UploadFile, Form
-import requests
-import base64
-import os
-import json
+from fastapi.responses import JSONResponse
+import requests, base64, os, re, json
 
 app = FastAPI()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 SYSTEM_PROMPT = """
-You are a professional data extraction engine for Hajj & Umrah rate sheets.
-
-Your task:
-Extract ALL data from the file without skipping anything.
-
-You MUST extract:
-- Hotels
-- Ziyarat packages
-- Transport services
-- Vehicle / car types
-- Routes & distances
-- Rates (sharing, double, triple, quad, quint, flat)
-- Check-in dates
-- Notes (rate reduced, coming soon, flat rate)
-- City (infer from section headers like MAKKAH HOTELS, MADINAH HOTELS)
+You are a professional data extraction engine for Hajj & Umrah travel agencies.
 
 Rules:
-- Do not assume hotel-only data
-- Do not stop after first category
-- Classify each row correctly
-- If value missing, return null
-- Return structured JSON ONLY
-- No explanations
+1. Extract ALL entities present in the file. No limits.
+2. Detect automatically:
+   - Hotels
+   - City (Makkah / Madinah / Other if mentioned)
+   - Room rates (sharing, double, triple, quad, quint, etc.)
+   - Transport (shuttle, private, car types)
+   - Ziyarat packages
+3. Do NOT summarize.
+4. Do NOT skip rows.
+5. If a value is missing, return null.
+6. Return ONLY valid JSON in the exact schema below.
+7. Never add explanations or text outside JSON.
+
+Schema:
+{
+  "hotels": [
+    {
+      "name": "",
+      "city": "",
+      "rates": {
+        "sharing": null,
+        "double": null,
+        "triple": null,
+        "quad": null,
+        "quint": null
+      }
+    }
+  ],
+  "transport": [],
+  "ziyarat": []
+}
 """
 
 @app.post("/extract")
@@ -40,12 +49,13 @@ async def extract_data(
     instructions: str = Form(default="")
 ):
     try:
+        # Read & encode image/file
         content = await file.read()
         encoded = base64.b64encode(content).decode("utf-8")
 
-        final_prompt = SYSTEM_PROMPT
+        user_prompt = SYSTEM_PROMPT
         if instructions.strip():
-            final_prompt += "\n\nAdditional user instructions:\n" + instructions
+            user_prompt += f"\nAdditional instructions:\n{instructions}"
 
         payload = {
             "model": "anthropic/claude-3.5-sonnet",
@@ -53,7 +63,7 @@ async def extract_data(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": final_prompt},
+                        {"type": "text", "text": user_prompt},
                         {
                             "type": "image_url",
                             "image_url": f"data:image/png;base64,{encoded}"
@@ -61,8 +71,8 @@ async def extract_data(
                     ]
                 }
             ],
-            "temperature": 0.1,
-            "max_tokens": 1200
+            "temperature": 0,
+            "max_tokens": 2000
         }
 
         headers = {
@@ -72,38 +82,42 @@ async def extract_data(
 
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
-            json=payload,
             headers=headers,
-            timeout=60
+            json=payload,
+            timeout=90
         )
 
-        data = response.json()
+        result = response.json()
 
-        # HARD FAIL if model returns error
-        if "error" in data:
-            return {
-                "status": "error",
-                "message": data["error"]
-            }
+        if "choices" not in result:
+            return JSONResponse(
+                status_code=500,
+                content={"error": result}
+            )
 
-        # Extract only the content text
-        raw_text = data["choices"][0]["message"]["content"]
+        raw_text = result["choices"][0]["message"]["content"]
 
-        # Claude usually returns clean JSON, but we still protect parsing
-        try:
-            extracted_json = json.loads(raw_text)
-        except:
-            extracted_json = {
-                "raw_output": raw_text
-            }
+        # ---- HARD JSON EXTRACTION ----
+        json_match = re.search(r"\{[\s\S]*\}", raw_text)
+        if not json_match:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "No JSON detected from AI"}
+            )
 
-        return {
-            "status": "success",
-            "data": extracted_json
+        clean_json = json.loads(json_match.group())
+
+        # ---- FINAL NORMALIZATION FOR LOVABLE ----
+        final_output = {
+            "hotels": clean_json.get("hotels", []),
+            "transport": clean_json.get("transport", []),
+            "ziyarat": clean_json.get("ziyarat", [])
         }
+
+        return final_output
 
     except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
