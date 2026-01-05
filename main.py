@@ -1,104 +1,141 @@
-from fastapi import FastAPI, UploadFile, Form
+from fastapi import FastAPI, UploadFile
 from fastapi.responses import JSONResponse
-import requests, base64, os, re
+import os, base64, json, re, requests
+from google.cloud import vision
 
 app = FastAPI()
 
+# ---------------- CONFIG ----------------
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+CLAUDE_MODEL = "anthropic/claude-3.5-haiku"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-SYSTEM_PROMPT = """
-You are a data extraction engine.
+# ---------------- OCR ----------------
+def run_ocr(image_bytes):
+    client = vision.ImageAnnotatorClient()
+    image = vision.Image(content=image_bytes)
+    response = client.document_text_detection(image=image)
 
-Extract ALL hotels, transport and ziyarat data.
-Do NOT format as markdown.
-Do NOT add explanations.
+    if response.error.message:
+        raise Exception(response.error.message)
 
-Return data in plain structured text like:
+    return response.full_text_annotation.text
 
-HOTEL:
-Name: ARAFAT GOLDEN
-City: Makkah
-Sharing: 16
-Quint: 20
-Quad: 32
-Triple: 24
-Double: 48
+# ---------------- AI FORMATTER ----------------
+def format_with_ai(ocr_text):
+    prompt = f"""
+You are a data formatter.
 
-Repeat for ALL rows.
+Input is OCR text from hotel rate sheets.
+
+Rules:
+- Do NOT guess
+- Extract ALL hotels
+- Detect city from headings (MAKKAH / MADINAH)
+- Keep hotel even if rates missing
+- Missing rates = 0
+- Output STRICT JSON only
+- No explanations
+
+JSON schema:
+{{
+  "hotels": [
+    {{
+      "name": "",
+      "city": "",
+      "rates": {{
+        "sharing": 0,
+        "quint": 0,
+        "quad": 0,
+        "triple": 0,
+        "double": 0
+      }}
+    }}
+  ],
+  "transport": [],
+  "ziyarat": []
+}}
+TEXT:
+{ocr_text}
 """
 
+    payload = {
+        "model": CLAUDE_MODEL,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0,
+        "max_tokens": 1200
+    }
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=60)
+    data = r.json()
+
+    raw = data["choices"][0]["message"]["content"]
+
+    # Safe JSON extraction
+    match = re.search(r"\{[\s\S]*\}", raw)
+    if not match:
+        raise Exception("AI did not return JSON")
+
+    return json.loads(match.group())
+
+# ---------------- NORMALIZER (LOVABLE SAFE) ----------------
+def normalize(data):
+    hotels = []
+    for h in data.get("hotels", []):
+        rates = h.get("rates", {})
+        clean_rates = {}
+        has_rate = False
+
+        for k in ["sharing", "quint", "quad", "triple", "double"]:
+            v = rates.get(k, 0)
+            try:
+                num = int(re.findall(r"\d+", str(v))[0])
+            except:
+                num = 0
+            if num > 0:
+                has_rate = True
+            clean_rates[k] = num
+
+        hotels.append({
+            "name": h.get("name", "").strip(),
+            "city": h.get("city", ""),
+            "rates": clean_rates,
+            "has_any_rate": has_rate
+        })
+
+    return {
+        "hotels": hotels,
+        "transport": data.get("transport", []),
+        "ziyarat": data.get("ziyarat", [])
+    }
+
+# ---------------- API ----------------
 @app.post("/extract")
-async def extract_data(
-    file: UploadFile,
-    instructions: str = Form(default="")
-):
+async def extract(file: UploadFile):
     try:
-        content = await file.read()
-        encoded = base64.b64encode(content).decode("utf-8")
+        image_bytes = await file.read()
 
-        final_prompt = SYSTEM_PROMPT
-        if instructions.strip():
-            final_prompt += "\nUser Instructions:\n" + instructions
+        # 1. OCR
+        ocr_text = run_ocr(image_bytes)
 
-        payload = {
-            "model": "anthropic/claude-3.5-sonnet",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": final_prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": f"data:image/png;base64,{encoded}"
-                        }
-                    ]
-                }
-            ],
-            "temperature": 0,
-            "max_tokens": 1800
-        }
+        # 2. AI formatting
+        structured = format_with_ai(ocr_text)
 
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        # 3. Normalize for Lovable
+        final_output = normalize(structured)
 
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=90
-        )
+        # Safety check
+        if len(final_output["hotels"]) == 0:
+            raise Exception("No hotels detected")
 
-        result = response.json()
-        text = result["choices"][0]["message"]["content"]
-
-        # -------- SAFE PARSING --------
-        hotels = []
-        blocks = re.split(r"\n\s*HOTEL:\s*", text)
-
-        for block in blocks[1:]:
-            def find(label):
-                m = re.search(label + r":\s*(.+)", block)
-                return m.group(1).strip() if m else None
-
-            hotels.append({
-                "name": find("Name"),
-                "city": find("City"),
-                "rates": {
-                    "sharing": find("Sharing"),
-                    "quint": find("Quint"),
-                    "quad": find("Quad"),
-                    "triple": find("Triple"),
-                    "double": find("Double")
-                }
-            })
-
-        return {
-            "hotels": hotels,
-            "transport": [],
-            "ziyarat": []
-        }
+        return final_output
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
