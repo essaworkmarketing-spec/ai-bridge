@@ -8,4 +8,5 @@ services:
       - key: OPENROUTER_API_KEY
         sync: false
       - key: MODEL
-        value: openai/gpt-4o-2024-08-06
+        value: openai/gpt-4o
+
