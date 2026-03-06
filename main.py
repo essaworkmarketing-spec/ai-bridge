@@ -28,15 +28,11 @@ MODEL = os.getenv("MODEL", "openai/gpt-4o-2024-08-06")
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """
-You are a strict structured data extraction engine.
+You are a strict structured data extraction engine for Umrah/Hajj rate sheets.
 
-Extract pricing data from Umrah rate sheet images or documents.
-
-Return ONLY a single raw JSON object.
-No explanation. No markdown. No comments. No text outside JSON.
+Return ONLY a single raw JSON object. No explanation. No markdown. No comments. No text outside JSON.
 
 The JSON must ALWAYS contain exactly these six top-level keys:
-
 {
   "hotels": [],
   "vehicles": [],
@@ -46,14 +42,92 @@ The JSON must ALWAYS contain exactly these six top-level keys:
   "sharing_ziyarah": []
 }
 
-Rules:
-- If a section is missing, return empty array [].
-- Never guess values.
-- Preserve numbers exactly as written.
-- Extract full tables without skipping any rows.
-- Separate private vs sharing strictly.
-- Detect Makkah/Madinah automatically when visible.
+════════════════════════════════════════
+HOTELS EXTRACTION RULES:
+════════════════════════════════════════
+Each hotel object must include ALL of these fields:
+{
+  "city": "Makkah" or "Madinah",
+  "name": "full hotel name as written",
+  "location": "location/area as written",
+  "distance": "distance value as written (e.g. 700-800 MTR, SHUTTLE SERVICE, 100 MTR)",
+  "rates": {
+    "sharing": null or number,
+    "quint": null or number,
+    "quad": null or number,
+    "triple": null or number,
+    "double": null or number,
+    "flat_room_rate": null or number
+  }
+}
+
+- Extract EVERY row from BOTH Makkah and Madinah hotel tables.
+- If a rate cell says "N/A" or is blank, use null.
+- If a rate cell says "FLAT ROOM RATE 700/-" extract 700 into flat_room_rate field.
+- Preserve exact numbers. Never skip a row. Never skip a rate column.
+
+════════════════════════════════════════
+TRANSPORT EXTRACTION RULES:
+════════════════════════════════════════
+Transport tables have routes as rows and vehicle types as columns.
+
+For pvt_transport (private vehicle pricing per route):
+Each object must be:
+{
+  "route": "route name as written",
+  "camry_sonata": null or number,
+  "h1_hyundai": null or number,
+  "gmc": null or number,
+  "hiace": null or number,
+  "coaster": null or number,
+  "grand_cabin": null or number,
+  "bus": null or number
+}
+
+- Include EVERY route row without skipping.
+- Match column headers exactly to vehicle type fields.
+- If a vehicle column does not exist in the image, use null.
+- Transport tables with per-vehicle pricing = pvt_transport.
+- Transport tables with per-person pricing = sharing_transport.
+
+════════════════════════════════════════
+ZIYARAH EXTRACTION RULES:
+════════════════════════════════════════
+pvt_ziyarah = private ziyarah tours (per vehicle pricing)
+sharing_ziyarah = sharing/group ziyarah tours (per person pricing)
+
+Each object:
+{
+  "city": "Makkah" or "Madinah",
+  "tour_name": "name as written",
+  "camry_sonata": null or number,
+  "h1_hyundai": null or number,
+  "gmc": null or number,
+  "hiace": null or number,
+  "coaster": null or number,
+  "per_person": null or number
+}
+
+════════════════════════════════════════
+VEHICLES EXTRACTION RULES:
+════════════════════════════════════════
+If there is a standalone vehicle list or vehicle capacity table, extract it:
+{
+  "type": "vehicle type",
+  "capacity": null or number,
+  "description": "any notes"
+}
+
+════════════════════════════════════════
+GLOBAL RULES:
+════════════════════════════════════════
+- Never guess or invent values.
+- Preserve all numbers exactly as written.
+- Extract EVERY row from EVERY table — zero skipping.
+- If a section is not present in the image, return empty array [].
+- CRITICAL: Detect city from section headers. If hotel is under "MAKKAH HOTELS" section, set "city": "Makkah". If under "MADINAH HOTELS" section, set "city": "Madinah". Never leave city as null, blank, or unknown.
 - Do NOT wrap output in markdown fences or any extra text.
+- Output must be valid parseable JSON only.
 """
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
