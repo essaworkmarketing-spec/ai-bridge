@@ -107,6 +107,20 @@ HARD RULES for flat room rate:
 - Extract the number only. "FLAT ROOM RATE 700/-" → 700. "FLAT ROOM RATE 185" → 185.
 - A table can have only Quint/Quad/Triple/Double columns and NO Sharing column. That is normal. Leave sharing=null.
 
+NEVER DUPLICATE THE FLAT RATE INTO A COLUMN — READ THIS:
+- The flat rate number belongs ONLY in flat_room_rate. It does NOT belong in double,
+  triple, quad, quint, or sharing.
+- The "FLAT ROOM RATE 70" cell is one wide merged cell. Its right edge happens to sit
+  under the Double column, but that does NOT mean Double = 70. Double is EMPTY on that row.
+- WRONG: flat_room_rate = 70 AND double = 70 (you copied the same number twice).
+- RIGHT: flat_room_rate = 70, double = null, triple = null, quad = null, quint = null, sharing = null.
+- Only put a number in double/triple/quad/quint when that specific column shows its OWN
+  separate number that is DIFFERENT from the flat rate (like FAJAR BADEA 4: quad 170, or
+  EMAAR AL KHALIL: quint 225, triple 210, double 195 with no flat text at all).
+- If a row has a flat rate AND every per-type column would just repeat that same number,
+  the per-type columns are all null. A number never appears in two fields on the same row
+  unless the sheet literally prints it in two different column cells.
+
 ════════════════════════════════════════
 PRIVATE TRANSPORT EXTRACTION RULES:
 ════════════════════════════════════════
@@ -399,6 +413,56 @@ def rescue_flat_room_rates(data: dict) -> dict:
     return data
 
 
+PER_TYPE_COLUMNS = ["sharing", "quint", "quad", "triple", "double"]
+
+
+def _num(v):
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.replace(",", "").strip()
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def dedupe_flat_into_columns(data: dict) -> dict:
+    """
+    Safety net for the opposite failure: the model reads a flat-room row
+    correctly into flat_room_rate but ALSO copies that same number into a
+    per-type column (almost always 'double', because the merged flat cell's
+    right edge sits under the Double column). If a per-type column equals the
+    flat_room_rate exactly, clear it to null. Only clears an exact duplicate,
+    never a genuinely different per-type price.
+    """
+    hotels = data.get("hotels")
+    if not isinstance(hotels, list):
+        return data
+
+    for hotel in hotels:
+        if not isinstance(hotel, dict):
+            continue
+
+        flat = _num(hotel.get("flat_room_rate"))
+        if flat is None or flat <= 0:
+            continue
+
+        for col in PER_TYPE_COLUMNS:
+            col_val = _num(hotel.get(col))
+            if col_val is not None and col_val == flat:
+                hotel[col] = None
+                logger.info(
+                    "dedupe_flat_into_columns: cleared %s=%s (duplicate of flat_room_rate) for hotel '%s'",
+                    col,
+                    int(flat) if flat.is_integer() else flat,
+                    hotel.get("name", "?"),
+                )
+
+    return data
+
+
 def build_message_content(
     file_bytes: bytes,
     filename: str,
@@ -554,5 +618,6 @@ async def extract_data(
 
     parsed = ensure_schema(parsed)
     parsed = rescue_flat_room_rates(parsed)
+    parsed = dedupe_flat_into_columns(parsed)
     logger.info("Extraction successful.")
     return parsed
