@@ -72,8 +72,40 @@ Each hotel object:
 - Extract EVERY row from BOTH Makkah and Madinah hotel tables.
 - CRITICAL: If hotel is under "MAKKAH HOTELS" header set city = "Makkah". If under "MADINAH HOTELS" header set city = "Madinah". Never leave city blank or unknown.
 - If a rate cell says "N/A" or is blank, use null.
-- If a cell says "FLAT ROOM RATE 700/-" extract 700 into flat_room_rate, set other rates to null.
 - Preserve exact numbers. Never skip any row or rate column.
+
+────────────────────────────────────────
+FLAT ROOM RATE — READ THIS CAREFULLY:
+────────────────────────────────────────
+The phrase "FLAT ROOM RATE" may appear in TWO different table layouts. Handle BOTH.
+
+LAYOUT A — flat rate sits inside a specific room-type column
+  Example: the row has columns Sharing | Quint | Quad | Triple | Double
+  and the text "FLAT ROOM RATE 490/-" is written across the Triple/Double cells.
+  → Set flat_room_rate = 490. Set sharing, quint, quad, triple, double = null.
+
+LAYOUT B — one wide merged cell under a "ROOM RATE" group header
+  Example: there is a group header "ROOM RATE" with sub-columns Quint | Quad | Triple | Double,
+  and most rows have a single merged cell spanning that whole block that reads
+  "FLAT ROOM RATE 70", "FLAT ROOM RATE 185", "FLAT ROOM RATE 700/-" etc.
+  → That number is the flat_room_rate. Set flat_room_rate = 70 (or 185, 700...).
+    Set sharing, quint, quad, triple, double = null for that row.
+
+MIXED ROWS (very important):
+  In Layout B some rows put a real number in ONE sub-column (e.g. Quad = 170, or Triple = 225)
+  AND still show "FLAT ROOM RATE 150" for the rest of the block.
+  Example row: "FAJAR BADEA 4 ... Quad column = 170 ... FLAT ROOM RATE 150"
+  → Put 170 in quad. Put 150 in flat_room_rate. Keep both. Do not drop either one.
+  Example row: "EMAAR AL KHALIL ... Quad 225 ... Triple 210 ... Double 195"
+  → This row has NO flat text, so fill quad=225, triple=210, double=195, flat_room_rate=null.
+
+HARD RULES for flat room rate:
+- ANY time you see the words "FLAT ROOM RATE" (in any casing, with or without /-, with or without a colon)
+  followed by a number ANYWHERE in a hotel row, that number MUST go into flat_room_rate.
+- Never leave flat_room_rate null if the row visibly contains the words "FLAT ROOM RATE" and a number.
+- Never mistake "FLAT ROOM RATE 70" for a distance, a column header, or plain text. It is always a price.
+- Extract the number only. "FLAT ROOM RATE 700/-" → 700. "FLAT ROOM RATE 185" → 185.
+- A table can have only Quint/Quad/Triple/Double columns and NO Sharing column. That is normal. Leave sharing=null.
 
 ════════════════════════════════════════
 PRIVATE TRANSPORT EXTRACTION RULES:
@@ -294,6 +326,57 @@ def ensure_schema(data: dict) -> dict:
     return data
 
 
+# Matches "FLAT ROOM RATE 700/-", "flat room rate: 185", "FLAT ROOM RATE  90" etc.
+FLAT_RATE_PATTERN = re.compile(
+    r"flat\s*room\s*rate\s*[:\-]?\s*(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def rescue_flat_room_rates(data: dict) -> dict:
+    """
+    Safety net: if the model left flat_room_rate null but the words
+    'FLAT ROOM RATE <number>' are sitting inside any string field of a
+    hotel row, pull that number into flat_room_rate. Never overwrites a
+    value the model already extracted correctly. Only touches hotels.
+    """
+    hotels = data.get("hotels")
+    if not isinstance(hotels, list):
+        return data
+
+    for hotel in hotels:
+        if not isinstance(hotel, dict):
+            continue
+
+        existing = hotel.get("flat_room_rate")
+        if isinstance(existing, (int, float)) and existing > 0:
+            continue  # already correct, leave it
+
+        found = None
+        for value in hotel.values():
+            if isinstance(value, str):
+                m = FLAT_RATE_PATTERN.search(value)
+                if m:
+                    try:
+                        found = float(m.group(1))
+                    except ValueError:
+                        found = None
+                    if found is not None:
+                        break
+
+        if found is not None:
+            hotel["flat_room_rate"] = int(found) if found.is_integer() else found
+            # A genuine flat-room row should not also carry per-type rates
+            # unless the model set them; leave any real numbers the model found.
+            logger.info(
+                "rescue_flat_room_rates: recovered flat_room_rate=%s for hotel '%s'",
+                hotel["flat_room_rate"],
+                hotel.get("name", "?"),
+            )
+
+    return data
+
+
 def build_message_content(
     file_bytes: bytes,
     filename: str,
@@ -448,5 +531,6 @@ async def extract_data(
         )
 
     parsed = ensure_schema(parsed)
+    parsed = rescue_flat_room_rates(parsed)
     logger.info("Extraction successful.")
     return parsed
