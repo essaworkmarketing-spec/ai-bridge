@@ -228,6 +228,28 @@ GLOBAL RULES:
 - Handle image, PDF, plain text, and Excel (as text) inputs equally well.
 - Do NOT wrap output in markdown fences or any extra text.
 - Output must be valid parseable JSON only.
+
+════════════════════════════════════════
+ACCURACY — READ EVERY ROW INDEPENDENTLY:
+════════════════════════════════════════
+This is critical. Long tables cause a specific failure: the model reads the
+first few rows correctly, then starts copying the previous row's number down
+the rest of the column instead of reading each cell fresh. DO NOT do this.
+
+- Read the number in EACH row separately, with fresh eyes, as if it were the
+  only row on the page. Never carry a value down from the row above.
+- Two rows next to each other often have DIFFERENT numbers even when they look
+  similar (e.g. 250, 260, 270, 300, 320, 340, 360, 370 in consecutive rows).
+  Read each one. Do not flatten them all to the same value.
+- Before finishing, re-scan the last third of every long table. That is where
+  copy-down errors happen most. Verify each flat_room_rate against the row it
+  belongs to.
+- If a row has a real number in a specific column (Quint, Quad, Triple, Double)
+  AND a flat rate, capture BOTH. Do not drop the column number in favor of the
+  flat rate, and do not drop the flat rate in favor of the column number.
+- Count the rows in each table. Your output must contain exactly that many hotel
+  objects for that city. If a table has 17 visible hotel rows, return 17 — never
+  16, never skip a row because it looks like the one above it.
 """
 
 # ── File type helpers ─────────────────────────────────────────────────────────
@@ -479,8 +501,8 @@ async def extract_data(
 
     payload = {
         "model": MODEL,
-        "temperature": 0.1,
-        "max_tokens": 4000,
+        "temperature": 0,
+        "max_tokens": 8000,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
