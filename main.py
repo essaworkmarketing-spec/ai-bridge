@@ -25,7 +25,7 @@ app.add_middleware(
 # ── Config ────────────────────────────────────────────────────────────────────
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = os.getenv("MODEL", "openai/gpt-4o")
+MODEL = os.getenv("MODEL", "google/gemini-2.5-flash")
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """
@@ -66,13 +66,27 @@ Each hotel object:
   "quad": null or number,
   "triple": null or number,
   "double": null or number,
-  "flat_room_rate": null or number
+  "flat_room_rate": null or number,
+  "confidence": "high" or "low"
 }
 
 - Extract EVERY row from BOTH Makkah and Madinah hotel tables.
 - CRITICAL: If hotel is under "MAKKAH HOTELS" header set city = "Makkah". If under "MADINAH HOTELS" header set city = "Madinah". Never leave city blank or unknown.
 - If a rate cell says "N/A" or is blank, use null.
 - Preserve exact numbers. Never skip any row or rate column.
+
+CONFIDENCE FLAG — be honest, this powers a human review step:
+- Set "confidence": "high" ONLY when you can read the row's numbers clearly and you
+  are sure they are correct.
+- Set "confidence": "low" whenever ANY of these is true for that row:
+    • a number is blurry, cut off, or hard to read
+    • the row shares its distance/rate with the rows above it and you are not fully
+      sure the number belongs to THIS row (copy-down risk)
+    • a merged cell makes it unclear which column a number belongs to
+    • the hotel name spans multiple lines or is hard to separate from the next row
+    • you had to guess anything at all
+- It is BETTER to mark "low" and be safe than to mark "high" and be wrong. A human
+  will double-check every "low" row. Do not hide uncertainty behind "high".
 
 ────────────────────────────────────────
 FLAT ROOM RATE — READ THIS CAREFULLY:
@@ -463,6 +477,70 @@ def dedupe_flat_into_columns(data: dict) -> dict:
     return data
 
 
+def _row_rate_value(hotel: dict):
+    """The single meaningful rate on a hotel row: flat first, else any per-type."""
+    flat = _num(hotel.get("flat_room_rate"))
+    if flat is not None and flat > 0:
+        return flat
+    for col in PER_TYPE_COLUMNS:
+        v = _num(hotel.get(col))
+        if v is not None and v > 0:
+            return v
+    return None
+
+
+def flag_repeated_rates(data: dict, run_length: int = 3) -> dict:
+    """
+    Copy-down errors show up as the same rate repeating on consecutive rows.
+    Some repeats are genuine (four hotels really at 250), so we don't change the
+    numbers — we only lower confidence so the human checks them. Any run of
+    `run_length` or more consecutive hotels (same city) with the identical rate
+    gets confidence='low'. Never raises confidence the model already set to low.
+    """
+    hotels = data.get("hotels")
+    if not isinstance(hotels, list) or not hotels:
+        return data
+
+    # Walk city by city, in order.
+    i = 0
+    n = len(hotels)
+    while i < n:
+        h = hotels[i]
+        if not isinstance(h, dict):
+            i += 1
+            continue
+
+        city = (h.get("city") or "").lower()
+        val = _row_rate_value(h)
+
+        j = i + 1
+        while j < n:
+            nxt = hotels[j]
+            if not isinstance(nxt, dict):
+                break
+            if (nxt.get("city") or "").lower() != city:
+                break
+            if _row_rate_value(nxt) != val or val is None:
+                break
+            j += 1
+
+        run = j - i
+        if val is not None and run >= run_length:
+            for k in range(i, j):
+                if isinstance(hotels[k], dict):
+                    hotels[k]["confidence"] = "low"
+            logger.info(
+                "flag_repeated_rates: %d consecutive rows share rate %s in %s -> flagged low",
+                run,
+                int(val) if float(val).is_integer() else val,
+                city or "?",
+            )
+
+        i = j if j > i + 1 else i + 1
+
+    return data
+
+
 def build_message_content(
     file_bytes: bytes,
     filename: str,
@@ -619,5 +697,6 @@ async def extract_data(
     parsed = ensure_schema(parsed)
     parsed = rescue_flat_room_rates(parsed)
     parsed = dedupe_flat_into_columns(parsed)
+    parsed = flag_repeated_rates(parsed)
     logger.info("Extraction successful.")
     return parsed
