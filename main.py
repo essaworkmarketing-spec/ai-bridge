@@ -143,18 +143,21 @@ pvt_transport = per vehicle pricing. Input is usually a table with vehicle colum
 Each object:
 {
   "route": "route name as written",
-  "camry_sonata": null or number,
-  "h1_hyundai": null or number,
-  "gmc": null or number,
-  "hiace": null or number,
-  "coaster": null or number,
-  "grand_cabin": null or number,
-  "bus": null or number
+  "rates": {
+    "<vehicle column header exactly as printed in the sheet>": number
+  }
 }
 
 - Include EVERY route row.
-- Match column headers to vehicle fields exactly.
-- If a vehicle column does not exist in the data, use null.
+- Read the vehicle column headers from THIS sheet only. Do NOT use any predefined,
+  remembered, or example vehicle list.
+- Use each column header exactly as printed, including slashes and the word "or".
+  Valid keys look like: "CAR", "STAREX OR STARIA", "GMC", "HIACE", "COASTER",
+  "H1/HYUNDAI", "GRAND CABIN". Whatever this sheet prints is what you output.
+- Add one key per vehicle column that has a price in that row.
+- If a cell is blank, dashed, or unreadable, OMIT that key entirely.
+  Never write null and never guess a number.
+- Never output a vehicle column that is not printed in this sheet.
 
 ════════════════════════════════════════
 SHARING TRANSPORT EXTRACTION RULES:
@@ -228,28 +231,44 @@ Each object:
 {
   "city": "Makkah" or "Madinah",
   "tour_name": "name as written",
-  "camry_sonata": null or number,
-  "h1_hyundai": null or number,
-  "gmc": null or number,
-  "hiace": null or number,
-  "coaster": null or number,
+  "rates": {
+    "<vehicle column header exactly as printed in the sheet>": number
+  },
   "per_person": null or number
 }
+
+- Read the vehicle column headers from THIS sheet only. Do NOT use any predefined,
+  remembered, or example vehicle list.
+- Use each column header exactly as printed. OMIT any vehicle whose cell is blank,
+  dashed, or unreadable. Never write null and never guess a number.
+- Never output a vehicle column that is not printed in this sheet.
 
 ════════════════════════════════════════
 VEHICLES EXTRACTION RULES:
 ════════════════════════════════════════
-If there is a standalone vehicle list or capacity table:
+Return one object for EVERY distinct vehicle column or vehicle name that appears
+anywhere in this sheet, even when there is no standalone capacity table:
 {
-  "type": "vehicle type",
+  "name": "vehicle name exactly as printed in the column header",
+  "type": "vehicle type if stated, else null",
   "capacity": null or number,
   "description": "any notes"
 }
+
+- Read capacity from the vehicle column header when it is printed there:
+  "CAR 3 SEATER" gives capacity 3.
+  "STAREX OR STARIA 7 SEATER" gives capacity 7.
+  "HIACE 9 SEATER" gives capacity 9.
+  "COASTER 15-16 SEATER" gives capacity 16 (for a range, use the higher number).
+- Never rename or normalize a vehicle. Keep the header text exactly as printed.
+- Never add a vehicle that is not printed in this sheet.
 
 ════════════════════════════════════════
 GLOBAL RULES:
 ════════════════════════════════════════
 - Never guess or invent values.
+- Never map a vehicle onto a predefined or remembered vehicle name. Vehicle names
+  ALWAYS come from this sheet's own column headers, exactly as printed.
 - Preserve all numbers exactly as written.
 - Extract EVERY row from EVERY table and EVERY item from EVERY list — zero skipping.
 - If a section is not present in the input, return empty array [].
