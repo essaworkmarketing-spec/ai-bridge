@@ -628,7 +628,7 @@ def _year_from_hint(hint):
     return int(m.group(1)) if m else None
 
 
-def normalize_rate_sheets(data: dict) -> dict:
+def _normalize_rate_sheets(data: dict) -> dict:
     """
     Take the model's grid and keep only what can be written without guessing.
 
@@ -753,6 +753,21 @@ def normalize_rate_sheets(data: dict) -> dict:
 
     data["rate_sheets"] = clean_sheets
     return data
+
+
+def normalize_rate_sheets(data: dict) -> dict:
+    """
+    The rate card is the newest thing this service does and the only one the
+    older screens do not need. A sheet shaped in a way nobody anticipated must
+    therefore cost an agency its rate card, never its whole upload: on any
+    failure the key comes back empty and everything else is returned untouched.
+    """
+    try:
+        return _normalize_rate_sheets(data)
+    except Exception as e:
+        logger.warning(f"Rate sheet normalisation failed, returning the rest: {e}")
+        data["rate_sheets"] = []
+        return data
 
 
 def _num(v):
