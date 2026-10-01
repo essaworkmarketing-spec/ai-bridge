@@ -35,14 +35,15 @@ You will receive data in ANY format: image, PDF, plain text, or Excel (converted
 
 Return ONLY a single raw JSON object. No explanation. No markdown. No comments. No text outside JSON.
 
-The JSON must ALWAYS contain exactly these six top-level keys:
+The JSON must ALWAYS contain exactly these seven top-level keys:
 {
   "hotels": [],
   "vehicles": [],
   "pvt_transport": [],
   "sharing_transport": [],
   "pvt_ziyarah": [],
-  "sharing_ziyarah": []
+  "sharing_ziyarah": [],
+  "rate_sheets": []
 }
 
 ════════════════════════════════════════
@@ -297,6 +298,86 @@ the rest of the column instead of reading each cell fresh. DO NOT do this.
 - Count the rows in each table. Your output must contain exactly that many hotel
   objects for that city. If a table has 17 visible hotel rows, return 17 — never
   16, never skip a row because it looks like the one above it.
+
+════════════════════════════════════════
+SINGLE HOTEL RATE SHEETS (the "rate_sheets" key):
+════════════════════════════════════════
+Some files are not a list of many hotels. They are ONE hotel's own rate card,
+with the hotel's rooms across the top and dated periods down the side, often
+split into floor bands (Regular Floor, Premium Floor, Executive Floor) and with
+an extra bed, parking and a meals table underneath.
+
+When the file is that kind of sheet, fill "rate_sheets". Otherwise leave it [].
+
+Each entry:
+{
+  "hotel": "Dallah Taiba Hotel",
+  "city": "Makkah" or "Madinah",
+  "distance": "distance from the Haram as written, or null",
+  "year_hint": "2026-27",
+  "floors": [
+    {
+      "floor": "regular" | "premium" | "executive" | null,
+      "covers": "Floors 2 to 8",
+      "extra_bed": 60 or null,
+      "rooms": ["double", "triple", "quad", "junior_suite_1"],
+      "room_labels": ["Twin / Double", "Triple", "Quad", "Junior Suite 1 (2 Room W/1 Washroom)"],
+      "room_details": ["", "", "", "2 rooms with 1 washroom"],
+      "pax": [2, 3, 4, 4],
+      "periods": [
+        { "from": "2026-07-01", "to": "2026-08-20", "rates": [513, 574, 634, 755] },
+        { "from": "2026-08-20", "to": "2026-09-01", "rates": [574, 634, 694, 815] }
+      ]
+    }
+  ],
+  "extras": [
+    { "type": "breakfast", "floor": null, "rate": 60 },
+    { "type": "breakfast", "floor": "executive", "rate": 70 },
+    { "type": "parking", "floor": null, "rate": 60 }
+  ]
+}
+
+RULES FOR rate_sheets:
+- "rooms" uses ONLY these keys, in the order the columns appear on the sheet:
+  sharing, quint, quad, triple, double, flat_room_rate, junior_suite_1,
+  junior_suite_2, senior_suite_2, senior_suite_3, apartment, executive_suite,
+  diplomatic_suite, premium_suite, royal_suite.
+  "Twin / Double" and "All Executive Twin / Double" are both "double".
+  "Senoir Suite 2" is a misspelling of Senior Suite 2 and maps to "senior_suite_2".
+  "Executive / Business Suites" maps to "executive_suite".
+  A column you cannot map to one of these keys is skipped entirely: drop it from
+  "rooms", "room_labels", "room_details", "pax" AND from every period's "rates".
+- "room_labels" is the column header exactly as printed.
+- "room_details" is only the part in brackets that describes the room, rewritten
+  plainly: "(2 Room W/1 Washroom)" becomes "2 rooms with 1 washroom". Empty
+  string when the header says nothing about rooms or washrooms.
+- "pax" is the PAX number printed under the column header.
+- Every period's "rates" array MUST have exactly the same length as "rooms", in
+  the same order. Use null for a blank or N/A cell. Never shift the row left.
+- "from" and "to" are ISO dates, YYYY-MM-DD. The sheet usually prints them as
+  "01-Jul  20-Aug" with the season year in the title ("Rates 1448 | 2026-27").
+  Use the first year from the title for the earliest period, and roll to the
+  next year as soon as the months wrap around: 01-Jul-2026 to 20-Aug-2026, then
+  20-Aug-2026 to 01-Sep-2026, and a period reading "20-Dec 10-Jan" becomes
+  2026-12-20 to 2027-01-10.
+- "floor" is one of regular, premium, executive, matched from the band heading
+  ("Regular Floor (02 Till 8th Floor)" is "regular"). A sheet with no floor
+  bands uses null and a single entry in "floors".
+- "covers" is the floor range in plain words: "Floors 2 to 8", "Floors 9 to 11".
+- "extra_bed" is that floor's extra bed price per night, from the table under
+  the rates ("Premium Floor - Extra Bed ... SAR 60/- Per Night" gives 60 on the
+  premium floor). A floor with no extra bed row gets null. NEVER copy another
+  floor's extra bed price onto a floor that does not list one.
+- "extras" covers the meals and parking tables. "type" is one of breakfast,
+  lunch, dinner, half_board, full_board, parking, other. "floor" is null when
+  the price applies to every floor, or the floor band it is listed against.
+  A meals table with a "Regular" row and an "Executive" row means: the Regular
+  prices go in with floor null, and the Executive prices go in with floor
+  "executive". Parking is per car per night.
+- Read every period row of every floor. A sheet with 3 floors and 6 periods has
+  18 period objects in total. Do not stop after the first floor.
+- When you fill "rate_sheets", still fill "hotels" with one entry for this hotel
+  carrying its cheapest standard room rates, so older screens keep working.
 """
 
 # ── File type helpers ─────────────────────────────────────────────────────────
@@ -321,6 +402,7 @@ REQUIRED_KEYS = [
     "sharing_transport",
     "pvt_ziyarah",
     "sharing_ziyarah",
+    "rate_sheets",
 ]
 
 
@@ -447,6 +529,230 @@ def rescue_flat_room_rates(data: dict) -> dict:
 
 
 PER_TYPE_COLUMNS = ["sharing", "quint", "quad", "triple", "double"]
+
+
+# ── Single hotel rate sheets ─────────────────────────────────
+#
+# The model reads the grid; this code is what makes it safe to write to a
+# database. Anything it cannot vouch for is dropped rather than guessed, because
+# a wrong rate on a quote costs an agency real money.
+
+ROOM_KEYS = {
+    "sharing", "quint", "quad", "triple", "double", "flat_room_rate",
+    "junior_suite_1", "junior_suite_2", "senior_suite_2", "senior_suite_3",
+    "apartment", "executive_suite", "diplomatic_suite", "premium_suite",
+    "royal_suite",
+}
+
+# What the sheets actually print, mapped onto the keys the app uses.
+ROOM_ALIASES = {
+    "twin": "double", "twindouble": "double", "twin/double": "double",
+    "allexecutivetwindouble": "double", "executivetwindouble": "double",
+    "singledouble": "double",
+    "juniorsuite1": "junior_suite_1", "juniorsuiteone": "junior_suite_1",
+    "juniorsuite2": "junior_suite_2", "juniorsuitetwo": "junior_suite_2",
+    "seniorsuite2": "senior_suite_2", "senoirsuite2": "senior_suite_2",
+    "seniorsuite3": "senior_suite_3", "senoirsuite3": "senior_suite_3",
+    "executivesuite": "executive_suite", "businesssuite": "executive_suite",
+    "executivebusinesssuite": "executive_suite", "executivebusinesssuites": "executive_suite",
+    "diplomaticsuite": "diplomatic_suite", "diplomaticsuites": "diplomatic_suite",
+    "premiumsuite": "premium_suite", "premiumsuites": "premium_suite",
+    "royalsuite": "royal_suite", "royalsuites": "royal_suite",
+    "apartments": "apartment",
+    "flatroomrate": "flat_room_rate", "flatrate": "flat_room_rate", "roomrate": "flat_room_rate",
+}
+
+FLOOR_KEYS = {"regular", "premium", "executive"}
+
+EXTRA_KEYS = {"breakfast", "lunch", "dinner", "half_board", "full_board", "parking", "other"}
+
+MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+LOOSE_DATE = re.compile(r"^\s*(\d{1,2})[\s\-/]*([A-Za-z]{3,4})\.?[\s\-/]*(\d{2,4})?\s*$")
+
+
+def _room_key(value):
+    """Map a column header onto one of the app's room types, or give up."""
+    if not isinstance(value, str):
+        return None
+    raw = value.strip().lower()
+    if raw in ROOM_KEYS:
+        return raw
+    squashed = re.sub(r"[^a-z0-9]", "", raw)
+    if squashed in ROOM_ALIASES:
+        return ROOM_ALIASES[squashed]
+    underscored = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    if underscored in ROOM_KEYS:
+        return underscored
+    return None
+
+
+def _iso_date(value, fallback_year):
+    """A date we would be willing to price a stay on, or nothing."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    m = ISO_DATE.match(text)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 2000 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31:
+            return "%04d-%02d-%02d" % (y, mo, d)
+        return None
+    m = LOOSE_DATE.match(text)
+    if not m:
+        return None
+    day = int(m.group(1))
+    month = MONTHS.get(m.group(2).lower()[:4]) or MONTHS.get(m.group(2).lower()[:3])
+    if not month or not (1 <= day <= 31):
+        return None
+    year_part = m.group(3)
+    if year_part:
+        year = int(year_part)
+        if year < 100:
+            year += 2000
+    elif fallback_year:
+        year = fallback_year
+    else:
+        return None
+    return "%04d-%02d-%02d" % (year, month, day)
+
+
+def _year_from_hint(hint):
+    if not isinstance(hint, str):
+        return None
+    m = re.search(r"(20\d{2})", hint)
+    return int(m.group(1)) if m else None
+
+
+def normalize_rate_sheets(data: dict) -> dict:
+    """
+    Take the model's grid and keep only what can be written without guessing.
+
+    Columns that do not map to a known room type are dropped together with their
+    whole column of prices, so a stray column can never shift a row of rates one
+    place to the left. A period without two usable dates is dropped, because a
+    seasonal rate with no season would silently price every night of the year.
+    """
+    sheets = data.get("rate_sheets")
+    if not isinstance(sheets, list):
+        data["rate_sheets"] = []
+        return data
+
+    clean_sheets = []
+    for sheet in sheets:
+        if not isinstance(sheet, dict):
+            continue
+        hotel_name = (sheet.get("hotel") or sheet.get("name") or "").strip()
+        if not hotel_name:
+            continue
+        fallback_year = _year_from_hint(sheet.get("year_hint"))
+
+        clean_floors = []
+        for floor in sheet.get("floors") or []:
+            if not isinstance(floor, dict):
+                continue
+            rooms_in = floor.get("rooms")
+            if not isinstance(rooms_in, list) or not rooms_in:
+                continue
+
+            labels_in = floor.get("room_labels") if isinstance(floor.get("room_labels"), list) else []
+            details_in = floor.get("room_details") if isinstance(floor.get("room_details"), list) else []
+            pax_in = floor.get("pax") if isinstance(floor.get("pax"), list) else []
+
+            # Which columns survive, and where they sat in the original row.
+            keep = []
+            rooms, labels, details, pax = [], [], [], []
+            seen = set()
+            for i, raw in enumerate(rooms_in):
+                key = _room_key(raw)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                keep.append(i)
+                rooms.append(key)
+                labels.append(str(labels_in[i]).strip() if i < len(labels_in) and labels_in[i] else "")
+                detail = str(details_in[i]).strip() if i < len(details_in) and details_in[i] else ""
+                details.append(detail)
+                cap = _num(pax_in[i]) if i < len(pax_in) else None
+                pax.append(int(cap) if cap and 1 <= cap <= 20 else None)
+            if not rooms:
+                continue
+
+            periods = []
+            for period in floor.get("periods") or []:
+                if not isinstance(period, dict):
+                    continue
+                rates_in = period.get("rates")
+                if not isinstance(rates_in, list):
+                    continue
+                start = _iso_date(period.get("from"), fallback_year)
+                end = _iso_date(period.get("to"), fallback_year)
+                # A sheet with no dates at all is a standing price list, which is
+                # fine. A half dated period is a misread, which is not.
+                if (period.get("from") or period.get("to")) and not (start and end):
+                    continue
+                # A period that ends before it starts crossed the new year.
+                if start and end and end < start:
+                    try:
+                        end = str(int(end[:4]) + 1) + end[4:]
+                    except ValueError:
+                        continue
+                rates = []
+                for i in keep:
+                    value = _num(rates_in[i]) if i < len(rates_in) else None
+                    rates.append(value if value and value > 0 else None)
+                if not any(r is not None for r in rates):
+                    continue
+                periods.append({"from": start, "to": end, "rates": rates})
+            if not periods:
+                continue
+
+            floor_key = (floor.get("floor") or "").strip().lower() if isinstance(floor.get("floor"), str) else ""
+            bed = _num(floor.get("extra_bed"))
+            clean_floors.append({
+                "floor": floor_key if floor_key in FLOOR_KEYS else None,
+                "covers": str(floor.get("covers") or "").strip(),
+                "extra_bed": bed if bed and bed > 0 else None,
+                "rooms": rooms,
+                "room_labels": labels,
+                "room_details": details,
+                "pax": pax,
+                "periods": periods,
+            })
+        if not clean_floors:
+            continue
+
+        clean_extras = []
+        for extra in sheet.get("extras") or []:
+            if not isinstance(extra, dict):
+                continue
+            kind = (extra.get("type") or "").strip().lower().replace(" ", "_")
+            if kind not in EXTRA_KEYS:
+                continue
+            rate = _num(extra.get("rate"))
+            if not rate or rate <= 0:
+                continue
+            floor_key = (extra.get("floor") or "").strip().lower() if isinstance(extra.get("floor"), str) else ""
+            clean_extras.append({
+                "type": kind,
+                "floor": floor_key if floor_key in FLOOR_KEYS else None,
+                "rate": rate,
+            })
+
+        clean_sheets.append({
+            "hotel": hotel_name,
+            "city": (sheet.get("city") or "").strip() or None,
+            "distance": (sheet.get("distance") or None),
+            "floors": clean_floors,
+            "extras": clean_extras,
+        })
+
+    data["rate_sheets"] = clean_sheets
+    return data
 
 
 def _num(v):
@@ -663,7 +969,9 @@ async def extract_data(
     payload = {
         "model": MODEL,
         "temperature": 0,
-        "max_tokens": 8000,
+        # A single hotel grid is three floors of six dated rows, which runs far
+        # past the old ceiling and used to come back truncated.
+        "max_tokens": 16000,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
@@ -717,5 +1025,6 @@ async def extract_data(
     parsed = rescue_flat_room_rates(parsed)
     parsed = dedupe_flat_into_columns(parsed)
     parsed = flag_repeated_rates(parsed)
+    parsed = normalize_rate_sheets(parsed)
     logger.info("Extraction successful.")
     return parsed
